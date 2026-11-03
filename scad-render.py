@@ -19,8 +19,15 @@ OpenSCAD's --camera value (6 or 7 comma-separated numbers). After CAMERA come
 zero to two optional tokens, in either order, at most one of each kind: p|o
 (projection, default p, perspective) and fit|fixed (default fit, which adds
 --viewall --autocenter; fixed adds neither). So `CAM`, `CAM o`, `CAM fixed`,
-`CAM fixed o` and `CAM o fixed` are all valid. Relative OUT paths, and
-OpenSCAD's working directory, are the MODEL's directory.
+`CAM fixed o` and `CAM o fixed` are all valid. OpenSCAD's working directory
+is the MODEL's directory, and OUT is a path relative to it. An OUT is refused
+(exit 2, nothing deleted) if it is absolute, if its directory resolves (symlinks
+followed) outside the model's directory, if it is the model file itself, if
+it is an existing directory, or if it does not end in the job's extension
+(.stl or .png, any case). Every OUT is deleted before the first render, so the
+most a manifest can remove is .stl and .png files under the model's directory:
+run a manifest you did not write only against a model in a directory whose
+.stl and .png files you can lose.
 
 Each -D on the command line goes to every render, after the part define,
 verbatim. Its value is OpenSCAD syntax, so a string needs shell quoting:
@@ -47,6 +54,10 @@ blank check. PNG renders need a display, so they run under `xvfb-run -a`
 unless --no-xvfb (without one the render fails, and some OpenSCAD builds
 still exit 0). Software GL is forced with LIBGL_ALWAYS_SOFTWARE=1.
 
+Log lines, reasons and OUT names are printed with control characters
+(U+0000-U+001F, U+007F, U+0080-U+009F) shown as \\xNN text, so a model or
+manifest cannot drive the terminal.
+
 Exit 0 if every output is ok, 1 if any FAIL, 2 for a bad manifest, a missing
 model, OpenSCAD or xvfb-run, or bad arguments.
 
@@ -70,9 +81,17 @@ class ManifestError(Exception):
     pass
 
 
-def parse_manifest(text, base):
+def inert(s):
+    """s with C0, DEL and C1 control characters shown as \\xNN text."""
+    return ''.join(f'\\x{ord(c):02x}' if ord(c) < 32 or 127 <= ord(c) < 160
+                   else c for c in s)
+
+
+def parse_manifest(text, base, model):
     """Return a list of job dicts; raise ManifestError naming the line."""
     jobs, seen = [], {}
+    rbase = os.path.realpath(base)
+    rmodel = os.path.realpath(model)
     for n, raw in enumerate(text.splitlines(), 1):
         f = raw.split('#', 1)[0].split()
         if not f:
@@ -120,9 +139,27 @@ def parse_manifest(text, base):
                    'proj': proj, 'fit': fit}
         else:
             bad(f'unknown kind {kind!r} (expected stl or png)')
-        path = os.path.normpath(os.path.join(base, job['out']))
+        out = job['out']
+        if os.path.isabs(out):
+            bad(f"OUT '{inert(out)}' is absolute; use a path relative to "
+                f"the model's directory")
+        path = os.path.normpath(os.path.join(base, out))
+        rparent = os.path.realpath(os.path.dirname(path))
+        try:
+            inside = os.path.commonpath([rbase, rparent]) == rbase
+        except ValueError:
+            inside = False
+        if not inside:
+            bad(f"OUT '{inert(out)}' is outside the model's directory")
+        if os.path.realpath(path) == rmodel:
+            bad(f"OUT '{inert(out)}' is the model file")
+        if os.path.isdir(path):
+            bad(f"OUT '{inert(out)}' is an existing directory")
+        if not out.lower().endswith('.' + kind):
+            bad(f"OUT '{inert(out)}' does not end in .{kind}; a {kind} "
+                f"manifest line writes a .{kind} file")
         if path in seen:
-            bad(f'duplicate OUT {job["out"]} (first on line {seen[path]})')
+            bad(f'duplicate OUT {inert(out)} (first on line {seen[path]})')
         seen[path] = n
         job['path'] = path
         job['line'] = n
@@ -276,7 +313,7 @@ def run_jobs(model, jobs, binp, extras, imgsize, scheme, min_png, use_xvfb, out)
             log, rc = p.stdout, p.returncode
         except OSError as e:
             log, rc = '', None
-            results.append((j, f'could not run: {e}'))
+            results.append((j, f'could not run: {inert(str(e))}'))
             continue
         lines = log.splitlines()
         for ln in lines:
@@ -286,11 +323,11 @@ def run_jobs(model, jobs, binp, extras, imgsize, scheme, min_png, use_xvfb, out)
                 keep = True
             if keep and ln not in shown:
                 shown.add(ln)
-                print(ln, file=out)
+                print(inert(ln), file=out)
         reason = None
         bad = next((ln for ln in lines if LOG_FAIL.search(ln)), None)
         if bad:
-            reason = f'render log: {bad.strip()}'
+            reason = f'render log: {inert(bad.strip())}'
         elif rc != 0:
             reason = f'exit status {rc}'
         elif not os.path.exists(j['path']):
@@ -307,9 +344,10 @@ def run_jobs(model, jobs, binp, extras, imgsize, scheme, min_png, use_xvfb, out)
                 os.remove(j['path'])
             except FileNotFoundError:
                 pass
-            print(f'FAIL {j["out"]} {reason}', file=out)
+            print(f'FAIL {inert(j["out"])} {reason}', file=out)
         else:
-            print(f'ok   {j["out"]} {os.path.getsize(j["path"])} bytes', file=out)
+            print(f'ok   {inert(j["out"])} {os.path.getsize(j["path"])} bytes',
+                  file=out)
     return fails
 
 
@@ -357,7 +395,7 @@ def main(argv=None):
         return 2
     base = os.path.dirname(os.path.abspath(a.model))
     try:
-        jobs = parse_manifest(text, base)
+        jobs = parse_manifest(text, base, a.model)
     except ManifestError as e:
         print(e, file=sys.stderr)
         return 2
@@ -394,7 +432,7 @@ def selftest(openscad_arg=None):
         cam = '0,0,0,55,0,25,0'
         fcam = '5,5,5,55,0,25,60'  # fixed has no autofit: needs a distance
 
-        def tool(manifest, *args, stdin=None):
+        def tool(manifest, *args, stdin=None, mdl=None):
             if stdin is None:
                 mp = os.path.join(d, 'manifest')
                 with open(mp, 'w') as fh:
@@ -402,7 +440,7 @@ def selftest(openscad_arg=None):
                 inp, mf = None, mp
             else:
                 inp, mf = stdin, '-'
-            p = subprocess.run([sys.executable, me, model, mf] + list(args)
+            p = subprocess.run([sys.executable, me, mdl or model, mf] + list(args)
                                + (['--openscad', openscad_arg] if openscad_arg else []),
                                input=inp, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True)
@@ -466,6 +504,72 @@ def selftest(openscad_arg=None):
         rc, o = tool(f'png a r.png {cam}\n')
         case('real png still ok', rc == 0 and 'ok   r.png' in o and has('r.png'),
              f'rc={rc} {o}')
+
+        # OUT containment: each refusal is exit 2 and deletes nothing.
+        sub = os.path.join(d, 'sub')
+        os.mkdir(sub)
+        outside = os.path.join(d, 'outside.stl')
+        far = os.path.join(d, 'far')
+        os.mkdir(far)
+        victim = os.path.join(far, 'x.stl')
+        for pth in (outside, victim):
+            with open(pth, 'w') as fh:
+                fh.write('victim')
+        mdir = os.path.join(d, 'mdir')
+        os.mkdir(mdir)
+        mpath = os.path.join(mdir, 'm.scad')
+        shutil.copy(model, mpath)
+        os.symlink(far, os.path.join(mdir, 'link'))
+        os.mkdir(os.path.join(mdir, 'adir'))
+        with open(os.path.join(mdir, 'keep.stl'), 'w') as fh:
+            fh.write('keep')
+
+        def alive(pth):
+            try:
+                with open(pth) as fh:
+                    return fh.read() in ('victim', 'keep', SELFTEST_MODEL)
+            except OSError:
+                return False
+
+        rc, o = tool('stl a keep.stl\nstl a ../outside.stl\n', mdl=mpath)
+        case('OUT ../ escape: exit 2, file and earlier OUT survive',
+             rc == 2 and 'outside' in o and alive(outside)
+             and alive(os.path.join(mdir, 'keep.stl')), f'rc={rc} {o}')
+        rc, o = tool(f'stl a {outside}\n', mdl=mpath)
+        case('absolute OUT: exit 2, file survives',
+             rc == 2 and 'absolute' in o and alive(outside), f'rc={rc} {o}')
+        rc, o = tool('stl a link/x.stl\n', mdl=mpath)
+        case('OUT through a directory symlink out of the model dir: exit 2',
+             rc == 2 and 'outside' in o and alive(victim), f'rc={rc} {o}')
+        m2 = os.path.join(mdir, 'm2.scad')
+        shutil.copy(model, m2)
+        rc, o = tool('stl a m2.scad\n', mdl=m2)
+        case('OUT equal to the model: exit 2, model survives',
+             rc == 2 and 'model file' in o and alive(m2), f'rc={rc} {o}')
+        rc, o = tool('stl a adir\n', mdl=mpath)
+        case('OUT naming an existing directory: exit 2',
+             rc == 2 and 'directory' in o and os.path.isdir(os.path.join(mdir, 'adir')),
+             f'rc={rc} {o}')
+
+        with open(os.path.join(mdir, 'notes.txt'), 'w') as fh:
+            fh.write('keep')
+        rc, o = tool('stl a notes.txt\n', mdl=mpath)
+        case('OUT without the job\'s extension: exit 2, the file survives',
+             rc == 2 and '.stl' in o and alive(os.path.join(mdir, 'notes.txt')),
+             f'rc={rc} {o}')
+        rc, o = tool('png a pic.stl 0,0,0,55,0,25,0\n', mdl=mpath)
+        case('png line with a .stl OUT: exit 2', rc == 2 and '.png' in o, f'rc={rc} {o}')
+
+        # Inert terminal output.
+        emodel = os.path.join(d, 'esc.scad')
+        with open(emodel, 'w') as fh:
+            fh.write('echo(str("TAG ", chr(27), "[2K"));\ncube(1);\n')
+        rc, o = tool('stl - e.stl TAG\n', mdl=emodel)
+        case('ECHO line with ESC prints as \\x1b text, no raw ESC',
+             rc == 0 and '\\x1b[2K' in o and '\x1b' not in o, f'rc={rc} {o!r}')
+        rc, o = tool('stl - bad\x1b[2Kname.stl\n', mdl=emodel)
+        case('OUT with a control character: no raw ESC in output',
+             '\x1b' not in o, f'rc={rc} {o!r}')
 
     for ok in results:
         if not ok:

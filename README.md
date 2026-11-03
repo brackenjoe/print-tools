@@ -21,7 +21,7 @@ file: clone the repo and run it with `python3`.
 | `--shift-a DX,DY,DZ`, `--shift-b DX,DY,DZ` | none | translate a mesh before checking (no rotation); a negative value works as given, e.g. `--shift-a -219,-20.3,0` |
 | `--tol-area A` | 0.5 | largest section XOR area in mm² that passes |
 | `--tol-hole T` | 0.02 | largest hole centre offset, and diameter change, in mm that passes |
-| `--res R` | 0.02 | raster step in mm for the XOR area |
+| `--res R` | 0.02 | raster step in mm for the XOR area; must be above 0 |
 | `--strict` | off | exit 1 when the result is FAIL |
 
 Binary and ASCII STL are both read. Units are the file's, taken as mm.
@@ -69,7 +69,11 @@ default 0.02 took about 2.3 GB. For parts over about 100 mm, use `--res
 
 **Exit status.** 0 on PASS, and also on FAIL unless `--strict`. 1 on FAIL
 with `--strict`, or on an unexpected error such as running out of memory. 2
-on a usage error or an unreadable file. `--selftest` builds a few meshes in
+on a usage error or an unreadable file. A mesh with any NaN or infinite
+vertex coordinate is refused with exit 2, as is a NaN or infinite option
+value or a `--res` that is not above 0. A single NaN vertex would otherwise
+make every default section height NaN, and two different parts would compare
+as a PASS. `--selftest` builds a few meshes in
 a temporary directory, checks them and exits 0 only if every case passes.
 
 ## scad-render.py
@@ -97,7 +101,15 @@ keeps the camera as given. A manifest of `-` is read from standard input,
 so a script can compute cameras and pipe them in.
 
 Paths in the manifest are relative to the model's directory, and OpenSCAD
-runs there. Every `-D` on the command line goes to every render, after the
+runs there. An output `file` is refused, as a bad manifest line, if it is
+absolute, if its directory resolves (symlinks followed) outside the model's
+directory, if it is the model itself, if it names an existing directory, or
+if it does not end in `.stl` for an `stl` line or `.png` for a `png` line
+(any case).
+Every listed file is deleted before the first render, so a manifest you did
+not write can still remove `.stl` and `.png` files under the model's
+directory. Run a manifest you did not write only against a model in a directory whose
+`.stl` and `.png` files you can lose. Every `-D` on the command line goes to every render, after the
 part define. Its value is OpenSCAD syntax, so a string needs quotes that
 survive the shell: `-D 'label="v2"'`, not `-D label=v2`.
 
@@ -113,7 +125,9 @@ It checks the whole manifest before rendering anything; a bad line is
 reported with its line number. Then it deletes every listed output and
 renders them in order. PNGs render under `xvfb-run -a` unless `--no-xvfb`,
 with `LIBGL_ALWAYS_SOFTWARE=1` set. Every distinct `WARNING:` and `ERROR:`
-line from any render is printed once. Each output then prints `ok` or
+line from any render is printed once. Those lines, tagged `ECHO:` lines,
+failure reasons and file names are printed with control characters shown as
+`\xNN` text, so a model or manifest cannot drive your terminal. Each output then prints `ok` or
 `FAIL` with the reason. An output fails, and is deleted, when:
 
 - its log has an `ERROR:` line, or says the top-level object is empty (what

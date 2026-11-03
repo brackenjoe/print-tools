@@ -26,6 +26,9 @@ Holes: any closed section loop within 0.05 mm of a circle and smaller than
 --hole-max-d (default 6 mm) is listed, so a round pin counts as well as a
 bore. Larger bores are covered by the section XOR only.
 
+Non-finite input is refused with exit 2: a mesh with any NaN or inf vertex
+coordinate, and any NaN or inf option value (--res must also be above 0).
+
 Heights: --z and --hole-z default to heights chosen from the z range of the
 loaded meshes (8 evenly spaced section heights, and mid-height for holes);
 a line says so when they are used. --shift-a / --shift-b translate a mesh
@@ -71,6 +74,11 @@ def load_stl(path):
         sys.exit(2)
     if tris.shape[0] == 0:
         print(f"error: no triangles read from {path}", file=sys.stderr)
+        sys.exit(2)
+    bad = ~np.isfinite(tris).all(axis=2)
+    if bad.any():
+        print(f"error: {path}: {int(bad.sum())} vertices are not finite "
+              f"(NaN or inf)", file=sys.stderr)
         sys.exit(2)
     return tris
 
@@ -332,15 +340,32 @@ def pair_holes(holesA, holesB):
 
 # ------------------------------------------------------------------- cli --
 
+def _finite(x):
+    try:
+        v = float(x)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {x!r}")
+    if not np.isfinite(v):
+        raise argparse.ArgumentTypeError(f"not finite: {x!r}")
+    return v
+
+
+def _positive(x):
+    v = _finite(x)
+    if v <= 0:
+        raise argparse.ArgumentTypeError(f"must be above 0: {x!r}")
+    return v
+
+
 def parse_triplet(s):
-    parts = [float(x) for x in s.split(',')]
+    parts = [_finite(x) for x in s.split(',')]
     if len(parts) != 3:
         raise argparse.ArgumentTypeError(f"expected dx,dy,dz, got {s!r}")
     return np.array(parts, dtype=float)
 
 
 def parse_floats(s):
-    return [float(x) for x in s.split(',') if x.strip() != '']
+    return [_finite(x) for x in s.split(',') if x.strip() != '']
 
 
 def _preprocess_argv(argv):
@@ -366,7 +391,10 @@ def _preprocess_argv(argv):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    ap = argparse.ArgumentParser(
+        description=__doc__.strip().splitlines()[0],
+        epilog='Meshes with NaN or inf vertices, NaN or inf option values, '
+               'and a --res that is not above 0 are refused with exit 2.')
     ap.add_argument('mesh_a', nargs='?', help='STL to check, or the reference when comparing')
     ap.add_argument('mesh_b', nargs='?', help='STL to compare against A (optional)')
     ap.add_argument('--shift-a', type=parse_triplet, default=np.zeros(3),
@@ -376,16 +404,16 @@ def main():
     ap.add_argument('--z', type=parse_floats, default=None, metavar='Z1,Z2,...',
                     help='section heights, comma separated '
                          '(default: 8 evenly spaced over the z range)')
-    ap.add_argument('--hole-z', type=float, default=None,
+    ap.add_argument('--hole-z', type=_finite, default=None,
                     help='height at which round loops are fitted as holes '
                          '(default: middle of the z range)')
-    ap.add_argument('--hole-max-d', type=float, default=6.0,
+    ap.add_argument('--hole-max-d', type=_finite, default=6.0,
                     help='largest diameter in mm counted as a hole (default 6)')
-    ap.add_argument('--res', type=float, default=0.02,
+    ap.add_argument('--res', type=_positive, default=0.02,
                     help='raster step in mm for section XOR areas (default 0.02)')
-    ap.add_argument('--tol-area', type=float, default=0.5,
+    ap.add_argument('--tol-area', type=_finite, default=0.5,
                     help='largest section XOR area in mm2 that passes (default 0.5)')
-    ap.add_argument('--tol-hole', type=float, default=0.02,
+    ap.add_argument('--tol-hole', type=_finite, default=0.02,
                     help='largest hole centre offset and diameter change in mm that pass (default 0.02)')
     ap.add_argument('--strict', action='store_true',
                     help='exit 1 when the result is FAIL')
@@ -685,6 +713,30 @@ def selftest():
         rc, out = run(f('box_bin.stl'), '--shift-b', '1,0,0')
         case('--shift-b without a second mesh is a usage error, exit 2',
              rc == 2, f'rc={rc}\n{out}')
+
+        big = _make_box(50, 50, 40)
+        for tag, val in (('nan', np.nan), ('inf', np.inf)):
+            badm = np.concatenate([big, np.full((1, 3, 3), val)])
+            _write_binary_stl(f(f'big_{tag}.stl'), badm)
+            rc, out = run(f('box_bin.stl'), f(f'big_{tag}.stl'), '--strict')
+            case(f'compare, B has an all-{tag} triangle: exit 2, no PASS',
+                 rc == 2 and 'RESULT: PASS' not in out, f'rc={rc}\n{out}')
+            rc, out = run(f(f'big_{tag}.stl'), f('box_bin.stl'), '--strict')
+            case(f'compare, A has an all-{tag} triangle: exit 2, no PASS',
+                 rc == 2 and 'RESULT: PASS' not in out, f'rc={rc}\n{out}')
+
+        _write_ascii_stl(f('nan_ascii.stl'),
+                         np.concatenate([box, [[[np.nan, 0, 0], [1, 0, 0],
+                                                [0, 1, 0]]]]))
+        rc, out = run(f('nan_ascii.stl'))
+        case('ASCII STL with a nan vertex: exit 2', rc == 2,
+             f'rc={rc}\n{out}')
+
+        rc, out = run(f('box_bin.stl'), '--z', 'nan')
+        case('--z nan is a usage error, exit 2', rc == 2, f'rc={rc}\n{out}')
+
+        rc, out = run(f('box_bin.stl'), '--res', '0')
+        case('--res 0 is a usage error, exit 2', rc == 2, f'rc={rc}\n{out}')
 
         rc, out = run(f('box_bin.stl'))
         case('--z omitted prints an auto-height line',
