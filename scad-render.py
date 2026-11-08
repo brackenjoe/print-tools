@@ -52,7 +52,12 @@ real one, so size cannot tell them apart; the check decodes the PNG with
 zlib. Only 8-bit, non-interlaced PNGs are decoded; any other PNG skips the
 blank check. PNG renders need a display, so they run under `xvfb-run -a`
 unless --no-xvfb (without one the render fails, and some OpenSCAD builds
-still exit 0). Software GL is forced with LIBGL_ALWAYS_SOFTWARE=1.
+still exit 0). Software GL is forced with LIBGL_ALWAYS_SOFTWARE=1, and the
+offscreen context is GLX (OPENSCAD_OFFSCREEN_CONTEXT=glx unless already set):
+an EGL build's default context opens the first EGL device, and where the
+user can open /dev/dri/card* Mesa 25.2.8 segfaults there with software GL
+forced (exit 139, OpenSCAD 2026.10.29 nightly). OpenSCAD builds that do not
+read the variable ignore it.
 
 Log lines, reasons and OUT names are printed with control characters
 (U+0000-U+001F, U+007F, U+0080-U+009F) shown as \\xNN text, so a model or
@@ -298,6 +303,7 @@ def run_jobs(model, jobs, binp, extras, imgsize, scheme, min_png, use_xvfb, out)
             cmd = [binp, '-o', j['path']] + dflags + [modelname]
         else:
             env['LIBGL_ALWAYS_SOFTWARE'] = '1'
+            env.setdefault('OPENSCAD_OFFSCREEN_CONTEXT', 'glx')
             cmd = [binp, '-o', j['path'], f'--imgsize={imgsize}',
                    f'--camera={j["camera"]}']
             if j['fit'] == 'fit':

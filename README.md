@@ -124,7 +124,11 @@ survive the shell: `-D 'label="v2"'`, not `-D label=v2`.
 It checks the whole manifest before rendering anything; a bad line is
 reported with its line number. Then it deletes every listed output and
 renders them in order. PNGs render under `xvfb-run -a` unless `--no-xvfb`,
-with `LIBGL_ALWAYS_SOFTWARE=1` set. Every distinct `WARNING:` and `ERROR:`
+with `LIBGL_ALWAYS_SOFTWARE=1` and, unless you set it,
+`OPENSCAD_OFFSCREEN_CONTEXT=glx`. Without it, an EGL build's default context
+(OpenSCAD 2026.10.29 nightly) opens `/dev/dri/card*` if you can, and with
+software GL forced Mesa 25.2.8 segfaults there (exit 139). Builds that do not
+read the variable ignore it. Every distinct `WARNING:` and `ERROR:`
 line from any render is printed once. Those lines, tagged `ECHO:` lines,
 failure reasons and file names are printed with control characters shown as
 `\xNN` text, so a model or manifest cannot drive your terminal. Each output then prints `ok` or
